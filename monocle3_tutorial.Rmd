@@ -1,0 +1,399 @@
+---
+title: "monocle3_tutorial"
+author: "Mike Mariani"
+date: "6/15/2020"
+output: html_document
+---
+
+## Set our markdown options
+
+```{r setup, include=TRUE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+## scRNA-Seq analysis with Monocle3
+
+>Here we have scRNA-Seq data for three
+different treatments or conditions; namely, 
+the virus life cycle stage of HSV1 infections:
+"acute", "latent", and "reactivation".
+
+>Previously we looked at using Seurat to 
+cluster and visualize scRNA-seq data, as well
+as identify marker genes that define the clusters
+and identify genes that vary between life cycle stage.
+
+>Here we will take a look at another popular 
+R porgram for scRNA-seq anlaysis: Monocle version 3
+
+>First we will load the scRNA-seq data and then
+perform prepreocessing, dimenionsality reduction 
+(again using UMAP), and finally look at generating
+a gene expression trajectory and seeing how gene expression
+changes over said trajectory.
+
+## Loading step
+
+>Load the R libraries, genes text file and the expression data
+(expression data is currently stored as a seurat RDS oobject).
+
+```{r load, error=FALSE,message=FALSE,warning=FALSE,results="hide" }
+
+suppressPackageStartupMessages(
+  {
+    library(ggplot2)
+    library(Seurat)
+    library(monocle)
+    library(monocle3)
+    library(ggrepel)
+  }
+)
+
+viral.genes <- read.table(file="/slipstream/home/mmariani/projects/tutorials/monocle3/viral.genes.txt",
+                          header=FALSE,
+                          stringsAsFactors = FALSE,
+                          sep="\t")$V1
+
+infected.object <- readRDS(file = "/slipstream/home/mmariani/projects/tutorials/monocle3/seurat.object2.rds")
+paste0(length(Seurat::Cells(infected.object)), " total cells in object, ~5e3 cells per virus life cycle stage")
+
+```
+
+## Convert Seurat data into monocle3 format:
+
+>Monocle3 has its own functionality for loading 
+scRNA-seq data, in this example we have a pre-existing
+seurat object that we will convert into a monocle3 object.
+Note that it is more direct when possible, and probably better
+practice, to load data directly into monocle3, in this case
+we have a Seurat object so we wil need to convert it.
+
+```{r convert}
+
+data <- as(as.matrix(infected.object@assays$RNA@counts), 'sparseMatrix')
+##rownames(data)
+##colnames(data)
+##length(colnames(data))
+
+infected.data <- as(as.matrix(infected.object@assays$RNA@counts), 'sparseMatrix')
+##rownames(data)
+##colnames(data)
+
+pData <- infected.object@meta.data
+pData$cell <- rownames(pData)
+
+fData <- data.frame(id = row.names(data), gene_short_name = row.names(data))
+rownames(fData) <- rownames(data)
+
+infected <- monocle3::new_cell_data_set(expression_data=infected.data,
+                                     cell_metadata = pData,
+                                     gene_metadata = fData)
+
+##ncol(infected)
+##unique(infected@colData$orig.ident)
+
+```
+
+##Preprocessing
+
+```{r preprocess}
+
+infected <- monocle3::preprocess_cds(infected, num_dim = 100)
+
+```
+
+##Variance explained
+
+>Check the "variance explained plot" to make sure you are capturing 
+enough dimensions, we can see that from the plot, 100, as
+specified above, is more than adequates
+
+```{r var_explained}
+
+pc_variance_explained <- plot_pc_variance_explained(infected)
+pc_variance_explained
+
+```
+
+##Dimensionality Reduction
+
+```{r dim_reduce, error=FALSE,message=FALSE,warning=FALSE,results="hide"}
+
+infected <- monocle3::reduce_dimension(infected,
+                                    max_components = 2,
+                                    cores=8,
+                                    verbose=FALSE)
+
+```
+
+## Perform cell clustering
+
+```{r clustering}
+
+infected <- monocle3::cluster_cells(infected,
+                                 verbose=FALSE)
+
+```
+
+## Learn the graph
+
+```{r graph, error=FALSE,message=FALSE,warning=FALSE,results="hide"}
+
+infected <- monocle3::learn_graph(infected, verbose=FALSE, use_partition=TRUE)
+
+```
+
+## Look at the cells according to their original identities
+
+```{r orig_ident, error=FALSE,message=FALSE,warning=FALSE,results="hide"}
+
+monocle3::plot_cells(infected,
+                    color_cells_by = "orig.ident",
+                    label_cell_groups=TRUE,
+                    label_leaves=TRUE,
+                    label_branch_points=TRUE,
+                    graph_label_size=3) +
+                    theme(legend.position = "right")
+
+```
+
+##Overall viral gene expression
+
+>Look at the viral gene expression across all cells
+grouped by virus life cycle stage. May need to store
+the plot as an R variable and use ggsave to save it
+with large enough size parameters for adequate inspection. 
+
+```{r virus_expression, error=FALSE,message=FALSE,warning=FALSE, fig.width=12, fig.height=48}
+
+monocle3::plot_genes_violin(subset(infected,rownames(infected) %in% viral.genes), 
+                            group_cells_by = "orig.ident", 
+                            ncol=6)
+
+```
+
+##Differential gene expression analysis
+
+>Here we can use the graph_test autocorrelation test
+to see which genes vary across the UMAP/partitions
+calculated above by Seurat. Below we get the genes 
+with q_value < 0.05 
+
+```{r diff_genes, error=FALSE,message=FALSE,warning=FALSE,results="hide"}
+
+pr_graph_test_res <- graph_test(infected, neighbor_graph="knn", cores=8)
+pr_deg_ids <- row.names(subset(pr_graph_test_res, q_value < 0.05))
+
+```
+## Choose starting nodes
+
+>Looking at the above plot choose starting nodes
+for our trajectorie(s).  Load 
+
+```{r choose_start, error=FALSE,message=FALSE,warning=FALSE,results="hide" }
+
+#root_pr_nodes can be found in infected@principal_graph_aux$UMAP$root_pr_nodes , after
+#manual selection.  Here I have specified them explicitly after choosing them manually
+
+root_pr_nodes_chosen <- c(
+  "Y_8",   
+  "Y_10",  
+  "Y_15",  
+  "Y_53",  
+  "Y_56",  
+  "Y_65",  
+  "Y_71",  
+  "Y_74",  
+  "Y_155", 
+  "Y_158", 
+  "Y_176", 
+  "Y_177", 
+  "Y_179", 
+  "Y_181",
+  "Y_182",
+  "Y_183", 
+  "Y_185", 
+  "Y_189", 
+  "Y_190", 
+  "Y_191", 
+  "Y_193", 
+  "Y_194", 
+  "Y_195", 
+  "Y_197", 
+  "Y_199", 
+  "Y_203", 
+  "Y_208", 
+  "Y_209", 
+  "Y_211",
+  "Y_212",
+  "Y_222")
+
+infected <- monocle3::order_cells(infected, 
+                               reduction_method = "UMAP",
+                               root_pr_nodes = root_pr_nodes_chosen,
+                               verbose=FALSE)
+
+```
+
+##Trajectory visualization
+
+>Now let's look at our trajectory based off of
+our selected starting nodes from above -
+note that the partitions will change depending
+on which starting nodes that you choose.
+
+```{r visualization}
+
+monocle3::plot_cells(infected,
+  color_cells_by = "orig.ident",
+  label_cell_groups=TRUE,
+  label_leaves=TRUE,
+  label_branch_points=TRUE,
+  graph_label_size=3) +
+  theme(legend.position = "right")
+
+monocle3::plot_cells(infected,
+  color_cells_by = "partition",
+  label_cell_groups=TRUE,
+  label_leaves=TRUE,
+  label_branch_points=TRUE,
+  graph_label_size=3) +
+  theme(legend.position = "right")
+
+monocle3::plot_cells(infected,
+  color_cells_by = "seurat_clusters",
+  label_cell_groups=TRUE,
+  label_leaves=TRUE,
+  label_branch_points=TRUE,
+  graph_label_size=3) +
+  theme(legend.position = "right")
+
+monocle3::plot_cells(infected,
+color_cells_by = "pseudotime",
+label_cell_groups=FALSE,
+label_leaves=TRUE,
+label_branch_points=TRUE,
+graph_label_size=3) +
+theme(legend.position = "right")
+
+```
+
+## Differential trajectory gene analysis
+
+>Find virus genes across that vary across our
+Trajectory (note this is not identical to 
+finding genes that vary across the umap 
+clusters/partitions).  For a large number of 
+genes you may want to store the plot object
+as a variable and use ggsave to save a large
+.pdf or .jpg for easier inspection.
+
+>First we will subset out the virus genes from the 
+Monocle3 CDS object ("infected")
+
+```{r subset_traj}
+
+virus_lineage_cds <- infected[rowData(infected)$gene_short_name %in% viral.genes,]
+
+```
+
+>pseudotime plot with the overlain expression trajectory, 
+colored by the orignal cell identities
+
+```{r traj_old, fig.width=12,fig.height=48}
+
+plot_genes_in_pseudotime(virus_lineage_cds,
+  color_cells_by="old.ident",
+  min_expr=0.5)
+
+```
+
+>pseudotime plot with the overlain expression trajectory, 
+colored by the clusters formerly identified using
+Seurat
+
+```{r traj_seurat, fig.width=12,fig.height=48}
+
+plot_genes_in_pseudotime(virus_lineage_cds,
+  color_cells_by="seurat_clusters",
+  min_expr=0.5)
+
+```
+
+>pseudotime plot with the overlain expression trajectory, 
+colored by pseudotime (trajectory units).  There is an 
+issue with this attempt at output
+
+>Perform graph_test using "principal_graph" to
+identify viral genes that vary significantly 
+over "pseudotime" or "across the trajectory"
+
+```{r pseudo_test, error=FALSE,message=FALSE,warning=FALSE,results="hide" }
+
+virus_cds_pr_test_res <- graph_test(infected, neighbor_graph="principal_graph", cores=8)
+virus_deg_ids <- row.names(subset(virus_cds_pr_test_res, q_value < 0.05))
+paste0(length(virus_deg_ids[virus_deg_ids %in% viral.genes]),
+       "/75 viral genes identified as varying significantly across the trajectory")
+
+```
+
+>Score the viral genes based on their expression
+similarity across the trajectory
+
+```{r traj_scoring}
+
+virus_pr_deg_ids <- pr_deg_ids[pr_deg_ids %in% viral.genes]
+gene_module_df <- find_gene_modules(infected[virus_pr_deg_ids,], resolution=0.001)
+viral.modules <- subset(gene_module_df,id %in% viral.genes)
+
+```
+
+>Now we can use some custom ggplot to look at the UMAP from
+the above trajectory gene scoring and we see that the genes
+group into two broad clusters. We can also save the results 
+used for plotting as an excel object to see which genes fall 
+in which of the clusters.
+
+```{r traj_clusters, fig.width=12, fig.height=12}
+
+ggplot(viral.modules,aes(x=dim_1,y=dim_2,label=id)) +
+  geom_point() +
+  geom_label_repel() +
+  theme_bw() 
+
+## write.xlsx(x=viral.modules,
+##            file = paste0("/slipstream/home/mmariani/projects/tutorials/monocle3/trajectory_gene_umap_clusters.xlsx"))
+
+```
+
+## Plot module scores
+
+>Here we can plot the modules scores calculated above 
+as another means of visualizing differences in gene
+expression calculated by monocle across our trajectory(ies)
+
+```{r plot_mod, error=FALSE,message=FALSE,warning=FALSE,results="hide", fig.width=12, fig.height=12}
+
+plot_cells(infected,
+  genes=viral.modules,
+  label_cell_groups=FALSE,
+  show_trajectory_graph=TRUE)
+
+```
+
+## Plot individual gene expression
+
+>Finally let's look at the expression 
+levels for each viral gene
+
+```{r module_gene, error=FALSE,message=FALSE,warning=FALSE,results="hide", fig.width=16, fig.height=48 }
+
+plot_cells(infected,
+  genes=viral.genes,
+  label_cell_groups=FALSE,
+  show_trajectory_graph=TRUE)
+
+```
